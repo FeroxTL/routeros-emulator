@@ -52,6 +52,7 @@ outputs are compared line by line.
 | `11_minus.rsc`  | binary/unary minus: `10-4`, `10--4`, `10 -4`, `5--3`, `(-3)` |
 | `13_not.rsc`    | the `not` prefix (identity) and logical NOT `!` |
 | `14_where.rsc`  | comparison coercions (`1 = "1"`), `~`, `in`/CIDR, logical `||` / `&&` |
+| `15_scope.rsc`  | variable scope: first `:global`/`:local` fixes the kind, `:local` cannot shadow a `:global`, same-kind redeclare updates; function isolation (`:global name;` inside a function makes it visible, `:set` writes through, functions never see outer locals) |
 
 ## What the comparison with hardware has confirmed and baked in
 
@@ -87,6 +88,14 @@ Real findings (RouterOS 7.9) already implemented in `routeros/*`:
   `where` (and `find name~"pattern"`, `ttl>1h`) supports `= != <> < > <= >= ~ in`,
   `and`/`or`/`||`/`&&`, parentheses and the `yes`/`no` bool coercion for bool
   properties.
+- **Variable scope is declaration-based**: the first `:global`/`:local` for a
+  name fixes its kind — a later `:local name` cannot shadow an existing
+  `:global` (and vice-versa), while a same-kind redeclaration updates the value.
+  A global-scope `:local` is visible for the rest of the same script.
+  **Functions are fully isolated**: they see only parameters, their own
+  `:local`s and globals referenced with `:global name;` inside the body;
+  functions never see an outer `:local`, and `:set $name` on a `:global`-declared
+  name writes through to the persistent global.
 - **Time prints as `HH:MM:SS`**: `90m` → `01:30:00`; composite durations like
   `1h30m` parse; `:len 90m` → `8`.
 - **`:find` returns "nothing" on no match** (not `-1`); comparisons against

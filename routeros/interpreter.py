@@ -9,11 +9,28 @@ from .values import NOTHING, IPValue, ROArray, Time, to_str, truthy
 
 
 class Env:
-    __slots__ = ("store", "parent")
+    __slots__ = ("store", "parent", "is_frame")
 
-    def __init__(self, parent=None, store=None):
+    def __init__(self, parent=None, store=None, is_frame=False):
         self.store = store if store is not None else {}
         self.parent = parent
+        # A function-call frame is isolated from every enclosing scope. Only
+        # parameters, the function's own `:local`s and globals explicitly
+        # referenced with `:global name;` inside the body are visible in it.
+        self.is_frame = is_frame
+
+
+class _GlobalRef:
+    """Bookkeeping binding used inside an isolated function frame.
+
+    ``:global name;`` inside a function does *not* copy the value into the
+    frame; instead it stores a ``_GlobalRef`` so that ``$name`` reads (and
+    ``:set $name`` writes) the live global on the device.
+    """
+    __slots__ = ("name",)
+
+    def __init__(self, name):
+        self.name = name
 
 
 class ReturnSignal(Exception):
@@ -45,6 +62,11 @@ class Interpreter:
         # Name of the entry-point function whose top-level `[call]` is filtered
         # out when `run_main` is False (so a script can be "loaded" as a library).
         self.main_name = main_name
+        # First-declaration kind of each variable ('global' | 'local'). On RouterOS
+        # the first `:global`/`:local` for a name fixes its kind: a later
+        # declaration of the other kind is ignored (a `:local` cannot shadow an
+        # existing `:global`), while a same-kind redeclaration updates the value.
+        self.var_kind = {}
 
     # ---------- variable resolution ----------
     def find(self, name, env):
@@ -57,7 +79,14 @@ class Interpreter:
 
     def resolve(self, name, env):
         e = self.find(name, env)
-        return e.store.get(name, NOTHING) if e else NOTHING
+        if e is None:
+            return NOTHING
+        v = e.store.get(name, NOTHING)
+        # Inside an isolated function a `:global name;` binding is a reference
+        # to the persistent global store.
+        if isinstance(v, _GlobalRef):
+            return self.root.store.get(v.name, NOTHING)
+        return v
 
     # ---------- evaluation ----------
     def make_value(self, node, env):
@@ -258,7 +287,7 @@ class Interpreter:
         fn = self.resolve(name, env)
         if not isinstance(fn, FunctionValue):
             raise _NotAFunction(f"{name} is not a function")
-        frame = Env(fn.env)
+        frame = Env(None, is_frame=True)
         pos = 0
         for a in args:
             if a.name is not None:
@@ -379,7 +408,12 @@ class Interpreter:
     def assign_var(self, name, value, env):
         e = self.find(name, env)
         if e is not None:
-            e.store[name] = value
+            # Writing to a `:global name;` reference inside a function updates
+            # the persistent global (`:set $x` writes through to the global).
+            if isinstance(e.store.get(name), _GlobalRef):
+                self.root.store[name] = value
+            else:
+                e.store[name] = value
         else:
             env.store[name] = value
 
@@ -455,13 +489,33 @@ class Interpreter:
 
     def exec_decl(self, node, env):
         name = node.name
-        if node.kind == "global":
+        is_global = node.kind == "global"
+        first = self.var_kind.get(name)
+        if first is None:
+            first = "global" if is_global else "local"
+            self.var_kind[name] = first
+        # The first declaration fixes the kind; a later declaration of the other
+        # kind is a no-op (a `:local` cannot shadow an existing `:global`).
+        if is_global:
+            if first == "local":
+                return
             if node.value is None:
-                if self.find(name, self.root) is None:
+                # `:global name;` -- a reference/re-declaration; don't clobber an
+                # already-bound value (keeps a previously defined global intact).
+                if name not in self.root.store:
                     self.root.store[name] = NOTHING
             else:
                 self.root.store[name] = self.make_value(node.value, env)
+            # Inside an isolated function a `:global name;` must also bind a
+            # local reference so the global is writable/readable within the body.
+            anc = env
+            while anc is not None and not anc.is_frame:
+                anc = anc.parent
+            if anc is not None and name not in anc.store:
+                anc.store[name] = _GlobalRef(name)
         else:
+            if first == "global":
+                return
             env.store[name] = self.make_value(node.value, env) if node.value is not None else NOTHING
 
     def exec_set(self, node, env):
