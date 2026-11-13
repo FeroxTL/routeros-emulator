@@ -11,7 +11,7 @@ class Token:
     __slots__ = ("kind", "value", "line")
 
     def __init__(self, kind, value, line):
-        # kind: word | kw | str | num | dur | time | var | op | eof
+        # kind: word | kw | str | num | dur | time | var | op | eol | eof
         self.kind = kind
         self.value = value
         self.line = line
@@ -157,7 +157,7 @@ def _read_string(src, i, line):
 
 
 _SIMPLE_PUNCT = set("(){}[];,")
-_TWO_OP = {"->", "<=", ">=", "!=", "==", "<>", "<<", ">>"}
+_TWO_OP = {"->", "<=", ">=", "!=", "==", "<>", "<<", ">>", "||", "&&"}
 
 
 def tokenize(text):
@@ -166,12 +166,16 @@ def tokenize(text):
     line = 1
     n = len(text)
     prev_i = -1
+    nest = 0  # depth of [ and ( -- a newline inside them does NOT end a statement
     while i < n:
         if i == prev_i:
             raise RuntimeError(f"tokenizer stuck at {i}: {text[max(0,i-8):i+8]!r}")
         prev_i = i
         c = text[i]
         if c == "\n":
+            # at the top level (outside [ and () a newline terminates a statement
+            if nest == 0:
+                tokens.append(Token("eol", "eol", line))
             line += 1
             i += 1
             continue
@@ -184,6 +188,10 @@ def tokenize(text):
             continue
         if c in _SIMPLE_PUNCT:
             tokens.append(Token("op", c, line))
+            if c in "[(":
+                nest += 1
+            elif c in "])":
+                nest -= 1
             i += 1
             continue
         if c == "$":

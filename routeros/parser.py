@@ -9,6 +9,46 @@ class ParseError(SyntaxError):
     pass
 
 
+_CMP_OPS = {"=", "==", "!=", "<>", "<", ">", "<=", ">=", "~", "in"}
+_LITERAL_WORDS = {"true", "false", "nil"}
+
+
+def _bare_word(node):
+    """A bare word literal -> a record property reference (A.Prop)."""
+    if isinstance(node, A.Str) and len(node.parts) == 1 and node.parts[0][0] == "lit":
+        v = node.parts[0][1]
+        if v not in _LITERAL_WORDS:
+            return A.Prop(v)
+    return node
+
+
+def _lhs_prop(node):
+    """The left operand of a comparison/`in` in `where` is a record property."""
+    if isinstance(node, A.BinOp):
+        return _propertyize(node)
+    return _bare_word(node)
+
+
+def _propertyize(node):
+    """Turn the needed nodes of a `where` predicate into property references.
+
+    Inside `where`, the left operands of comparisons/`in` and standalone words
+    (bool properties like `running`, `comment`) are references to record
+    properties, while right operands are ordinary literal values.
+    """
+    if isinstance(node, A.BinOp):
+        if node.op in _CMP_OPS:
+            node.left = _lhs_prop(node.left)
+            return node  # the right operand is a value, not a property
+        node.left = _propertyize(node.left)
+        node.right = _propertyize(node.right)
+        return node
+    if isinstance(node, A.UnOp):
+        node.operand = _propertyize(node.operand)
+        return node
+    return _bare_word(node)
+
+
 class Parser:
     def __init__(self, tokens):
         self.toks = tokens
@@ -36,6 +76,10 @@ class Parser:
         t = self.current()
         return t.kind in ("kw", "word") and t.value == value
 
+    def skip_eols(self):
+        while self.current().kind == "eol":
+            self.advance()
+
     def expect_op(self, value):
         t = self.current()
         if t.kind == "op" and t.value == value:
@@ -61,6 +105,10 @@ class Parser:
     def parse_program(self):
         stmts = []
         while self.current().kind != "eof":
+            self.skip_semi()
+            self.skip_eols()
+            if self.current().kind == "eof":
+                break
             stmts.append(self.parse_statement())
         return A.Program(stmts)
 
@@ -105,7 +153,8 @@ class Parser:
             node = self.parse_log()
         elif t.kind == "word":
             name = self.expect_ident()
-            node = A.ExprStmt(A.Bracket("command", name, self.parse_command_args(";")))
+            args, filters = self.parse_command_args(";")
+            node = A.ExprStmt(A.Bracket("command", name, args, filters))
         else:
             raise ParseError(f"unexpected token {t!r} at line {t.line}")
 
@@ -113,7 +162,7 @@ class Parser:
         return node
 
     def skip_semi(self):
-        while self.is_op(";"):
+        while self.is_op(";") or self.current().kind == "eol":
             self.advance()
 
     def parse_block_body(self):
@@ -123,6 +172,11 @@ class Parser:
             t = self.current()
             if t.kind == "eof":
                 raise ParseError(f"unterminated block at line {t.line}")
+            if self.is_op("}"):
+                self.advance()
+                break
+            self.skip_semi()
+            self.skip_eols()
             if self.is_op("}"):
                 self.advance()
                 break
@@ -186,6 +240,7 @@ class Parser:
         cond = self.parse_expr()
         then = self.do_block_or_brace()
         else_ = []
+        self.skip_eols()
         if self.is_word("else"):
             self.advance()
             else_ = self.do_block_or_brace()
@@ -231,6 +286,7 @@ class Parser:
     def parse_docatch(self):
         self.advance()
         body = self.do_block_or_brace()
+        self.skip_eols()
         if self.is_word("while"):
             # :do {...} while=(cond) — do-while
             self.advance()
@@ -238,6 +294,7 @@ class Parser:
             cond = self.parse_expr()
             return A.DoWhile(cond, body)
         catch = []
+        self.skip_eols()
         if self.is_word("on-error"):
             self.advance()
             catch = self.do_block_or_brace()
@@ -253,10 +310,13 @@ class Parser:
     def parse_log(self):
         self.advance()
         level = self.expect_ident()
-        self.expect_word("message")
-        self.expect_op("=")
-        message = self.parse_expr()
-        return A.Log(level, message)
+        if self.is_word("message"):
+            # non-standard form: :log info message="..."
+            self.advance()
+            self.expect_op("=")
+            return A.Log(level, self.parse_expr())
+        # canonical device form: :log info "text"  (and :log warning ...)
+        return A.Log(level, self.parse_expr())
 
     # ---------- expressions ----------
     def parse_expr(self):
@@ -264,14 +324,14 @@ class Parser:
 
     def parse_or(self):
         node = self.parse_and()
-        while self.is_word("or"):
+        while self.is_word("or") or self.is_op("||"):
             self.advance()
             node = A.BinOp("or", node, self.parse_and())
         return node
 
     def parse_and(self):
         node = self.parse_in()
-        while self.is_word("and"):
+        while self.is_word("and") or self.is_op("&&"):
             self.advance()
             node = A.BinOp("and", node, self.parse_in())
         return node
@@ -419,6 +479,9 @@ class Parser:
         while not self.is_op("}"):
             if self.current().kind == "eof":
                 raise ParseError("unterminated array literal")
+            self.skip_eols()
+            if self.is_op("}"):
+                break
             t = self.current()
             if t.kind == "str":
                 self.advance()
@@ -464,9 +527,9 @@ class Parser:
             return A.Bracket("builtin", t.value, args)
         if t.kind == "word":
             self.advance()
-            args = self.parse_command_args("]")
+            args, filters = self.parse_command_args("]")
             self.expect_op("]")
-            return A.Bracket("command", t.value, args)
+            return A.Bracket("command", t.value, args, filters)
         raise ParseError(f"unexpected token {t!r} at line {t.line}")
 
     def parse_call_args(self, stop):
@@ -476,6 +539,8 @@ class Parser:
             if t.kind == "eof":
                 raise ParseError("unterminated call")
             if t.kind == "op" and t.value == stop:
+                break
+            if t.kind == "eol":
                 break
             if t.kind in ("word", "kw") and self.peek().kind == "op" and self.peek().value == "=":
                 name = t.value
@@ -488,16 +553,19 @@ class Parser:
 
     def parse_command_args(self, stop):
         args = []
+        filters = []
         while True:
             t = self.current()
             if t.kind == "eof":
                 raise ParseError("unterminated command")
-            if t.kind == "op" and t.value in (stop, ";"):
+            if t.kind == "op" and t.value in (stop, ";", "}"):
+                break
+            if t.kind == "eol":
                 break
             if t.kind in ("word", "kw"):
                 if t.value == "where":
                     self.advance()
-                    self.parse_expr()  # filter, intentionally ignored by mocks
+                    filters.append(_propertyize(self.parse_expr()))
                     continue
                 nxt = self.peek()
                 if nxt.kind == "op" and nxt.value == "=":
@@ -505,18 +573,20 @@ class Parser:
                     self.advance()
                     self.advance()
                     args.append(A.Arg(name, None, self.parse_expr()))
-                elif nxt.kind == "op" and nxt.value in ("<", ">", "<=", ">=", "in"):
+                elif nxt.kind == "op" and nxt.value in ("<", ">", "<=", ">=", "~", "in", "!=", "<>"):
+                    # a filter param without `where`, e.g. `find name~"pattern"`,
+                    # `find ttl>1h`, `find address in {...}` -- it is a predicate
                     name = t.value
-                    op = nxt.value
+                    op = "!=" if nxt.value == "<>" else nxt.value
                     self.advance()
                     self.advance()
-                    args.append(A.Arg(name, op, self.parse_expr()))
+                    filters.append(A.BinOp(op, A.Prop(name), self.parse_expr()))
                 else:
                     self.advance()
                     args.append(A.Arg(None, None, A.Str([("lit", t.value)])))
             else:
                 args.append(A.Arg(None, None, self.parse_expr()))
-        return args
+        return args, filters
 
 
 def parse(text):

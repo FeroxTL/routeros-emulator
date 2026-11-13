@@ -19,6 +19,21 @@ class Var(Node):
         self.name = name
 
 
+class Prop(Node):
+    """A reference to a record property inside a ``where`` predicate.
+
+    In that context (``/x/find where name="a"``) a bare word like ``name``
+    denotes a property of the current record rather than a string literal.
+    Outside ``where`` bare words stay strings -- ``Prop`` is only produced by
+    the command parser.
+    """
+
+    __slots__ = ("name",)
+
+    def __init__(self, name):
+        self.name = name
+
+
 class Str(Node):
     __slots__ = ("parts",)  # list of ("lit", str) | ("var", name)
 
@@ -84,12 +99,13 @@ class Arg(Node):
 class Bracket(Node):
     """A ``[...]`` expression: function / builtin / command call."""
 
-    __slots__ = ("kind", "name", "args")
+    __slots__ = ("kind", "name", "args", "filters")
 
-    def __init__(self, kind, name, args):
+    def __init__(self, kind, name, args, filters=None):
         self.kind = kind  # 'func' | 'builtin' | 'command'
         self.name = name
         self.args = args
+        self.filters = filters or []  # parsed `where` predicates (AST nodes)
 
 
 class FuncLit(Node):

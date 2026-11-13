@@ -51,6 +51,7 @@ outputs are compared line by line.
 | `09_ip.rsc`     | ip type (`2.5` → `2.0.0.5`), `:typeof`, `+`/`-` arithmetic, only ip↔ip comparisons, `* / %` → error; non-canonical comparisons, `:tonum`/`:tostr` of ip, `"$a"` interpolation |
 | `11_minus.rsc`  | binary/unary minus: `10-4`, `10--4`, `10 -4`, `5--3`, `(-3)` |
 | `13_not.rsc`    | the `not` prefix (identity) and logical NOT `!` |
+| `14_where.rsc`  | comparison coercions (`1 = "1"`), `~`, `in`/CIDR, logical `||` / `&&` |
 
 ## What the comparison with hardware has confirmed and baked in
 
@@ -76,6 +77,16 @@ Real findings (RouterOS 7.9) already implemented in `routeros/*`:
   (`not false` → `false`, `not 5` → `5`).
 - **Arrays print without braces/spaces**: `{1;2;3}` → `1;2;3`,
   `{a={x=1};b=2}` → `a=x=1;b=2`, nested arrays are flattened.
+- **A newline is a statement separator** (like `;`): `:local a 1` on one line and
+  `:put $a` on the next run as two statements; inside `[...]`/`(...)` a newline
+  does not break an expression, while inside `{...}` blocks it separates
+  statements. This lets full migrations (e.g. 001.018.rsl) run in the emulator.
+  Also `||` and `&&` are valid logical operators (`true || false` → `true`,
+  `true && false`).
+- **`:find`/`print as-value` with `where`** filter records by their properties:
+  `where` (and `find name~"pattern"`, `ttl>1h`) supports `= != <> < > <= >= ~ in`,
+  `and`/`or`/`||`/`&&`, parentheses and the `yes`/`no` bool coercion for bool
+  properties.
 - **Time prints as `HH:MM:SS`**: `90m` → `01:30:00`; composite durations like
   `1h30m` parse; `:len 90m` → `8`.
 - **`:find` returns "nothing" on no match** (not `-1`); comparisons against

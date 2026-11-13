@@ -30,6 +30,23 @@ class DeviceModel:
         self.uptime = Time(7200)
         # Number of currently running jobs (reentrancy guard)
         self.jobs = 0
+        # Running script-jobs: list of {"script": name} for /system/script/job
+        self.job_scripts = []
+        # DNS static records: list of {"id", "name", "address", "ttl"}
+        self.dns_static = []
+        # Firewall nat rules: list of {"id", "comment", "out-interface"}
+        self.nat_rules = []
+        # Firewall address-list: list of {"id", "address", "list", "comment"}
+        self.address_lists = []
+        # PPP profiles: list of {"id", "name"}
+        self.ppp_profiles = []
+        # Certificates: list of {"id", "name", "common-name", "skid", "trusted", "private-key"}
+        self.certificates = []
+        # Routing filter rules: list of {"id", "chain", "rule"}
+        self.filter_rules = []
+        # Routing BGP: list of {"id", "name", "remote-address"}
+        self.bgp_connection = []
+        self.bgp_session = []
         # ping(ip) -> bool
         self.ping = lambda addr: True
         # E3372 web API responder: path suffix -> xml/dict body

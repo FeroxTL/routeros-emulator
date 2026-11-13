@@ -72,6 +72,9 @@ class Interpreter:
             return node.value
         if isinstance(node, A.Var):
             return self.resolve(node.name, env)
+        if isinstance(node, A.Prop):
+            # a record-property reference inside `where` reads the local env
+            return env.store.get(node.name, NOTHING)
         if isinstance(node, A.Str):
             return self._interp_str(node, env)
         if isinstance(node, A.ListLit):
@@ -147,16 +150,28 @@ class Interpreter:
 
     @staticmethod
     def _eq(a, b):
+        if isinstance(a, bool) or isinstance(b, bool):
+            return a == b
         if isinstance(a, IPValue) or isinstance(b, IPValue):
             # ip compares only with ip; ip = num -> false (as on a device)
             return (isinstance(a, IPValue) and isinstance(b, IPValue)
                     and a.value == b.value)
         if isinstance(a, Time) or isinstance(b, Time):
-            return float(getattr(a, "seconds", a)) == float(getattr(b, "seconds", b))
+            try:
+                return float(getattr(a, "seconds", a)) == float(getattr(b, "seconds", b))
+            except (TypeError, ValueError):
+                return False
         if a is NOTHING or b is NOTHING:
             return a is b
         if isinstance(a, ROArray) or isinstance(b, ROArray):
             return to_str(a) == to_str(b)
+        # RouterOS: 1 = "1" -> true (numeric coercion of strings, checked on 7.9)
+        if ((isinstance(a, str) and isinstance(b, (int, float))) or
+                (isinstance(b, str) and isinstance(a, (int, float)))):
+            try:
+                return float(a) == float(b)
+            except (TypeError, ValueError):
+                return False
         return a == b
 
     @staticmethod
@@ -185,7 +200,59 @@ class Interpreter:
                 named[a.name] = self.eval_expr(a.value, env)
             else:
                 positional.append(self.eval_expr(a.value, env))
-        return self.commands.execute(node.name, named, positional)
+        match = self._mk_where_matcher(node.filters, env) if node.filters else None
+        return self.commands.execute(node.name, named, positional, match)
+
+    def _mk_where_matcher(self, filters, env):
+        """Build a ``match(record)`` callable for the ``where`` predicates.
+
+        For each record a child env is created carrying its properties; bare
+        words (A.Prop) resolve from those properties, ``$var`` from the outer env.
+        """
+        def match(record):
+            rec_env = Env(env)
+            rec_env.store.update(record)
+            for f in filters:
+                if not truthy(self._eval_where(f, rec_env)):
+                    return False
+            return True
+        return match
+
+    _WHERE_CMP = {"=", "==", "!=", "<", ">", "<=", ">=", "~", "in"}
+
+    @staticmethod
+    def _coerce_yes_no(left, right):
+        """Inside ``where`` a bool property is compared with ``yes``/``no`` rather
+        than ``true``/``false`` (checked on 7.9); plain ``true = "yes"`` stays false."""
+        if isinstance(left, bool) and isinstance(right, str):
+            low = right.lower()
+            if low in ("yes", "no"):
+                return low == "yes"
+        return right
+
+    def _where_val(self, node, env):
+        if isinstance(node, A.Prop):
+            return env.store.get(node.name, NOTHING)
+        return self.eval_expr(node, env)
+
+    def _eval_where(self, node, env):
+        """Evaluate a ``where`` predicate with the ``yes``/``no`` bool semantics."""
+        if isinstance(node, A.BinOp):
+            if node.op in self._WHERE_CMP:
+                left = self._where_val(node.left, env)
+                right = self._coerce_yes_no(left, self._where_val(node.right, env))
+                op = "=" if node.op == "==" else node.op
+                return self._eval_binop(A.BinOp(op, A.Lit(left), A.Lit(right)), env)
+            if node.op in ("and", "or"):
+                le = self._eval_where(node.left, env)
+                if node.op == "and":
+                    return le if not truthy(le) else self._eval_where(node.right, env)
+                return le if truthy(le) else self._eval_where(node.right, env)
+        if isinstance(node, A.UnOp) and node.op == "!":
+            return not truthy(self._eval_where(node.operand, env))
+        if isinstance(node, A.Prop):
+            return env.store.get(node.name, NOTHING)
+        return self.eval_expr(node, env)
 
     def call_user(self, name, args, env):
         fn = self.resolve(name, env)
