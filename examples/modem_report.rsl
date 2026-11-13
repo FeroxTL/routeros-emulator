@@ -1,0 +1,119 @@
+#===============================================================================
+# modem_report.rsl — example script for the `routeros` interpreter/emulator.
+#
+# A small, self-contained RouterOS script that collects a snapshot of an LTE
+# modem (identity, signal, ICCID), checks WAN reachability with :ping and stores
+# the result in the global array `:global Report`. It is intentionally generic
+# and does NOT depend on any production infrastructure — its purpose is to
+# demonstrate the language + device-model emulation and to back the integration
+# tests, so anyone can pick it up as a template.
+#
+# Run it with the emulator:
+#     from routeros.device_model import DeviceModel
+#     from routeros.launcher import load_source
+#     load_source(open("examples/modem_report.rsl", encoding="utf-8").read(),
+#                 DeviceModel(), run_main=True)
+#
+# Semantics verified against a live MikroTik running RouterOS 7.9.
+#===============================================================================
+
+:global Report {
+  imei="";
+  imsi="";
+  rssi="";
+  model="";
+  iccid="";
+  ping="";
+  collected-at="";
+};
+
+#-------------------------------------------------------------------------------
+# getTag: extract the text between <tag> ... </tag> from an XML/HTML document.
+#   Example: :put [$getTag tag="Iccid" src="<r><Iccid>x</Iccid></r>"]   -> x
+#-------------------------------------------------------------------------------
+:global getTag do={
+  :local start [:find $src "<$tag"];
+  :if ($start < 0) do={:return "";};
+  :local close [:find $src ">" $start];
+  :if ($close < 0) do={:return "";};
+  :local stop [:find $src "</$tag>" ($close + 1)];
+  :if ($stop < 0) do={:return "";};
+  :return [:pick $src ($close + 1) $stop];
+};
+
+#-------------------------------------------------------------------------------
+# extractDigits: return the first contiguous run of digits in a string. Used to
+# pull a numeric ICCID out of a noisy AT-chat reply like "+ICCID: 8983...".
+#-------------------------------------------------------------------------------
+:global extractDigits do={
+  :local result "";
+  :local i 0;
+  :local len [:len $1];
+  :while ($i < $len) do={
+    :local ch [:pick $1 $i ($i + 1)];
+    :if ([:find "0123456789" $ch] >= 0) do={
+      :set result ($result . $ch);
+    } else={
+      :if ([:len $result] > 0) do={:set i $len;};
+    };
+    :set i ($i + 1);
+  };
+  :return $result;
+};
+
+#-------------------------------------------------------------------------------
+# modemICCID: fetch the ICCID of the modem named in $Report->"model".
+#   - Huawei E3372-style modems expose an HTTP API on 192.168.8.1 (no AT-chat);
+#   - everything else (SIMCOM/ME909 and friends) answers AT+ICCID via at-chat.
+#-------------------------------------------------------------------------------
+:global modemICCID do={
+  :global Report;
+  :global getTag;
+  :global extractDigits;
+  :if ([:find ($Report->"model") "E3372"] >= 0) do={
+    :local token ([/tool/fetch url="http://192.168.8.1/api/webserver/SesTokInfo" output=user as-value]->"data");
+    :local cookie ("Cookie: " . [$getTag tag="SesInfo" src=$token]);
+    :local info ([/tool/fetch url="http://192.168.8.1/api/device/information" http-header-field=$cookie output=user as-value]->"data");
+    :return [$getTag tag="Iccid" src=$info];
+  } else={
+    :local atr ([/interface/lte/at-chat number=0 input="AT+ICCID" as-value]->"output");
+    :return [$extractDigits $atr];
+  };
+};
+
+#-------------------------------------------------------------------------------
+# collect: read the modem's live state via /interface/lte/monitor, stamp the
+# current date/time and resolve the ICCID through the modem-specific path.
+#-------------------------------------------------------------------------------
+:global collect do={
+  :global Report;
+  :global modemICCID;
+  :local m [/interface/lte/monitor numbers=1 once as-value];
+  :set ($Report->"imei") ($m->"imei");
+  :set ($Report->"imsi") ($m->"imsi");
+  :set ($Report->"rssi") ($m->"rssi");
+  :set ($Report->"model") ($m->"model");
+  :set ($Report->"iccid") [$modemICCID];
+  :set ($Report->"collected-at") ([/system/clock/get date] . " " . [/system/clock/get time]);
+  :return $Report;
+};
+
+#-------------------------------------------------------------------------------
+# makeReport — entry-point (auto-run at the bottom). Collects the snapshot and
+# checks WAN reachability by pinging a few well-known addresses.
+#-------------------------------------------------------------------------------
+:global makeReport do={
+  :global Report;
+  :global collect;
+  :local reached "";
+  :foreach address in={8.8.8.8;77.88.8.8} do={
+    :local ok ([:len [/ping address=$address count=1]] = 0);
+    :if ($ok and ($reached = "")) do={:set reached [:tostr $address];};
+  };
+  :set ($Report->"ping") $reached;
+  [$collect];
+  :put $Report;
+};
+
+# Auto-run the entry-point when the script is *executed* (skipped on plain load).
+[$makeReport]

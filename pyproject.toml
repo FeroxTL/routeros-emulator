@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "routeros-emulator"
+version = "0.1.0"
+description = "Interpret and emulate the MikroTik RouterOS scripting language on a plain host."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["routeros", "mikrotik", "scripting", "interpreter", "emulator"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Interpreters",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/FeroxTL/routeros-emulator"
+Documentation = "https://github.com/FeroxTL/routeros-emulator#readme"
+
+[project.scripts]
+routeros-repl = "routeros.repl:main"
+
+[tool.setuptools.packages.find]
+include = ["routeros*"]

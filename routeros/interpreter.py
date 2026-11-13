@@ -1,0 +1,452 @@
+"""Interpreter for the RouterOS-script AST (evaluator + statements)."""
+
+import ipaddress
+
+from . import ast as A
+from . import builtins as BI
+from .commands import Commands
+from .values import NOTHING, IPValue, ROArray, Time, to_str, truthy
+
+
+class Env:
+    __slots__ = ("store", "parent")
+
+    def __init__(self, parent=None, store=None):
+        self.store = store if store is not None else {}
+        self.parent = parent
+
+
+class ReturnSignal(Exception):
+    def __init__(self, value):
+        super().__init__("return")
+        self.value = value
+
+
+class FunctionValue:
+    __slots__ = ("body", "env")
+
+    def __init__(self, body, env):
+        self.body = body
+        self.env = env
+
+
+class _NotAFunction(Exception):
+    pass
+
+
+class Interpreter:
+    def __init__(self, model, main_name=None):
+        self.root = Env()
+        self.model = model
+        self.commands = Commands(model)
+        self.output = []
+        self.log_events = []
+        self.run_main = True
+        # Name of the entry-point function whose top-level `[call]` is filtered
+        # out when `run_main` is False (so a script can be "loaded" as a library).
+        self.main_name = main_name
+
+    # ---------- variable resolution ----------
+    def find(self, name, env):
+        e = env
+        while e is not None:
+            if name in e.store:
+                return e
+            e = e.parent
+        return None
+
+    def resolve(self, name, env):
+        e = self.find(name, env)
+        return e.store.get(name, NOTHING) if e else NOTHING
+
+    # ---------- evaluation ----------
+    def make_value(self, node, env):
+        if node is None:
+            return NOTHING
+        if isinstance(node, A.FuncLit):
+            return FunctionValue(node.body, env)
+        return self.eval_expr(node, env)
+
+    def eval_expr(self, node, env):
+        if isinstance(node, A.Lit):
+            return node.value
+        if isinstance(node, A.Var):
+            return self.resolve(node.name, env)
+        if isinstance(node, A.Str):
+            return self._interp_str(node, env)
+        if isinstance(node, A.ListLit):
+            return ROArray([(i, self.eval_expr(it, env)) for i, it in enumerate(node.items)])
+        if isinstance(node, A.ArrayLit):
+            return self._eval_array(node, env)
+        if isinstance(node, A.Member):
+            return self._eval_member(node, env)
+        if isinstance(node, A.UnOp):
+            return self._eval_unop(node, env)
+        if isinstance(node, A.BinOp):
+            return self._eval_binop(node, env)
+        if isinstance(node, A.Bracket):
+            return self._eval_bracket(node, env)
+        if isinstance(node, A.FuncLit):
+            return FunctionValue(node.body, env)
+        raise TypeError(f"cannot evaluate {node!r}")
+
+    def _interp_str(self, node, env):
+        parts = []
+        for kind, val in node.parts:
+            if kind == "lit":
+                parts.append(val)
+            else:
+                parts.append(to_str(self.resolve(val, env)))
+        return "".join(parts)
+
+    def _eval_array(self, node, env):
+        arr = ROArray()
+        idx = 0
+        for key, expr in node.entries:
+            value = self.eval_expr(expr, env)
+            if key is None:
+                arr.items.append((idx, value))
+                idx += 1
+            else:
+                arr.items.append((key, value))
+        return arr
+
+    def _eval_member(self, node, env):
+        obj = self.eval_expr(node.target, env)
+        key = self.to_key(self.eval_expr(node.key, env))
+        if isinstance(obj, ROArray):
+            return obj.get(key)
+        return NOTHING
+
+    @staticmethod
+    def to_key(k):
+        if isinstance(k, bool):
+            return int(k)
+        if isinstance(k, Time):
+            return k.seconds
+        return k
+
+    def _eval_unop(self, node, env):
+        v = self.eval_expr(node.operand, env)
+        if node.op == "!":
+            return not truthy(v)
+        if node.op == "-":
+            if isinstance(v, Time):
+                return Time(-v.seconds)
+            return -(self._num(v))
+        raise KeyError(f"unhandled unary {node.op}")
+
+    def _num(self, v):
+        if isinstance(v, bool):
+            return 1 if v else 0
+        if isinstance(v, Time):
+            return v.seconds
+        if isinstance(v, (int, float)):
+            return v
+        return 0
+
+    @staticmethod
+    def _eq(a, b):
+        if isinstance(a, IPValue) or isinstance(b, IPValue):
+            # ip compares only with ip; ip = num -> false (as on a device)
+            return (isinstance(a, IPValue) and isinstance(b, IPValue)
+                    and a.value == b.value)
+        if isinstance(a, Time) or isinstance(b, Time):
+            return float(getattr(a, "seconds", a)) == float(getattr(b, "seconds", b))
+        if a is NOTHING or b is NOTHING:
+            return a is b
+        if isinstance(a, ROArray) or isinstance(b, ROArray):
+            return to_str(a) == to_str(b)
+        return a == b
+
+    @staticmethod
+    def _in(left, right):
+        if isinstance(right, ROArray):
+            return any(_val_eq(left, v) for _k, v in right.items)
+        if isinstance(right, str) and isinstance(left, str) and "/" in right:
+            try:
+                return ipaddress.ip_address(left) in ipaddress.ip_network(right, strict=False)
+            except ValueError:
+                return False
+        return True
+
+    def _eval_bracket(self, node, env):
+        if node.kind == "func":
+            return self.call_user(node.name, node.args, env)
+        if node.kind == "builtin":
+            vals = [self.eval_expr(a.value, env) for a in node.args]
+            return BI.call_builtin(node.name, vals)
+        named = {}
+        positional = []
+        for a in node.args:
+            if a.name is not None:
+                if a.op is not None:
+                    continue  # filter param, intentionally ignored
+                named[a.name] = self.eval_expr(a.value, env)
+            else:
+                positional.append(self.eval_expr(a.value, env))
+        return self.commands.execute(node.name, named, positional)
+
+    def call_user(self, name, args, env):
+        fn = self.resolve(name, env)
+        if not isinstance(fn, FunctionValue):
+            raise _NotAFunction(f"{name} is not a function")
+        frame = Env(fn.env)
+        pos = 0
+        for a in args:
+            if a.name is not None:
+                frame.store[a.name] = self.eval_expr(a.value, env)
+            else:
+                pos += 1
+                frame.store[str(pos)] = self.eval_expr(a.value, env)
+        try:
+            self.exec_body(fn.body, frame)
+        except ReturnSignal as r:
+            return r.value
+        return NOTHING
+
+    _CMP = {"=": lambda a, b: a == b, "!=": lambda a, b: a != b,
+            "<": lambda a, b: a < b, ">": lambda a, b: a > b,
+            "<=": lambda a, b: a <= b, ">=": lambda a, b: a >= b}
+
+    def _eval_binop(self, node, env):
+        op = node.op
+        if op == "and":
+            left = self.eval_expr(node.left, env)
+            if not truthy(left):
+                return left
+            return self.eval_expr(node.right, env)
+        if op == "or":
+            left = self.eval_expr(node.left, env)
+            if truthy(left):
+                return left
+            return self.eval_expr(node.right, env)
+
+        left = self.eval_expr(node.left, env)
+        right = self.eval_expr(node.right, env)
+        if op == ".":
+            return to_str(left) + to_str(right)
+        if op == "=":
+            return self._eq(left, right)
+        if op == "!=":
+            return not self._eq(left, right)
+        if op == "in":
+            return self._in(left, right)
+        if op == "~":
+            return str(left).__contains__(str(right))
+        if op in self._CMP:
+            # Device: any relational comparison with "nothing" -> false
+            if left is NOTHING or right is NOTHING:
+                return False
+            # ip compares only with ip; ip < num on a device is an error
+            if isinstance(left, IPValue) or isinstance(right, IPValue):
+                if isinstance(left, IPValue) and isinstance(right, IPValue):
+                    return self._CMP[op](left.value, right.value)
+                raise TypeError(f"cannot compare ip prefix with non-ip ({op})")
+            lv = self._cmp_value(left)
+            rv = self._cmp_value(right)
+            return self._CMP[op](lv, rv)
+        # ip: only `+`/`-` work on the 32-bit value; `*`/`/`/`%` are forbidden
+        if isinstance(left, IPValue) or isinstance(right, IPValue):
+            if op in ("+", "-"):
+                lv = left.value if isinstance(left, IPValue) else int(self._num(left))
+                rv = right.value if isinstance(right, IPValue) else int(self._num(right))
+                return IPValue(lv + rv) if op == "+" else IPValue(lv - rv)
+            raise TypeError(f"cannot {op} ip prefix")
+        # arithmetic + - * /
+        if isinstance(left, Time) or isinstance(right, Time):
+            ls = self._num(left)
+            rs = self._num(right)
+            if op == "-":
+                return Time(ls - rs)
+            if op == "+":
+                return Time(ls + rs)
+            if op == "*":
+                return Time(ls * rs)
+            if op == "/":
+                return Time(ls / rs)
+        if op == "-":
+            return self._num(left) - self._num(right)
+        if op == "+":
+            return self._num(left) + self._num(right)
+        if op == "*":
+            return self._num(left) * self._num(right)
+        if op == "/":
+            lv, rv = self._num(left), self._num(right)
+            if rv == 0:
+                raise ZeroDivisionError("division by zero")
+            # RouterOS divides as integers, truncating toward zero (10/4 => 2, -7/2 => -3)
+            return int(lv / rv)
+        if op == "%":
+            lv, rv = self._num(left), self._num(right)
+            if rv == 0:
+                raise ZeroDivisionError("division by zero")
+            return int(lv) % int(rv)
+        # Bitwise operations (RouterOS: `^` is XOR, `2 ^ 3` => 1)
+        if op in ("^", "&", "|", "<<", ">>"):
+            lv, rv = self._num(left), self._num(right)
+            li, ri = int(lv), int(rv)
+            if op == "^":
+                return li ^ ri
+            if op == "&":
+                return li & ri
+            if op == "|":
+                return li | ri
+            if op == "<<":
+                return li << ri
+            return li >> ri
+        raise KeyError(f"unhandled binop {op}")
+
+    def _cmp_value(self, v):
+        if isinstance(v, Time):
+            return v.seconds
+        if isinstance(v, bool):
+            return int(v)
+        return v
+
+    # ---------- statements ----------
+    def exec_body(self, stmts, env):
+        for s in stmts:
+            self.exec_stmt(s, env)
+
+    def assign_var(self, name, value, env):
+        e = self.find(name, env)
+        if e is not None:
+            e.store[name] = value
+        else:
+            env.store[name] = value
+
+    def exec_stmt(self, node, env):
+        if isinstance(node, A.Decl):
+            self.exec_decl(node, env)
+            return
+        if isinstance(node, A.SetStmt):
+            self.exec_set(node, env)
+            return
+        if isinstance(node, A.If):
+            if truthy(self.eval_expr(node.cond, env)):
+                self.exec_body(node.then, Env(env))
+            else:
+                self.exec_body(node.else_, Env(env))
+            return
+        if isinstance(node, A.While):
+            while truthy(self.eval_expr(node.cond, env)):
+                self.exec_body(node.body, Env(env))
+            return
+        if isinstance(node, A.For):
+            start = int(self.eval_expr(node.from_, env))
+            end = int(self.eval_expr(node.to, env))
+            step = int(self.eval_expr(node.step, env)) if node.step is not None else 1
+            if step > 0:
+                rng = range(start, end + 1, step)
+            else:
+                rng = range(start, end - 1, step)
+            for i in rng:
+                f = Env(env)
+                f.store[node.var] = i
+                self.exec_body(node.body, f)
+            return
+        if isinstance(node, A.Foreach):
+            it = self.eval_expr(node.iterable, env)
+            if isinstance(it, ROArray):
+                for k, v in it.items:
+                    f = Env(env)
+                    if node.val:
+                        f.store[node.key] = k
+                        f.store[node.val] = v
+                    else:
+                        f.store[node.key] = v
+                    self.exec_body(node.body, f)
+            return
+        if isinstance(node, A.DoCatch):
+            self.exec_docatch(node, env)
+            return
+        if isinstance(node, A.DoWhile):
+            while True:
+                self.exec_body(node.body, Env(env))
+                if not truthy(self.eval_expr(node.cond, env)):
+                    break
+            return
+        if isinstance(node, A.Error):
+            msg = to_str(self.eval_expr(node.value, env)) if node.value is not None else ""
+            raise RuntimeError(msg)
+        if isinstance(node, A.Return):
+            value = self.eval_expr(node.value, env) if node.value is not None else NOTHING
+            raise ReturnSignal(value)
+        if isinstance(node, A.Put):
+            self.output.append(to_str(self.eval_expr(node.value, env)))
+            return
+        if isinstance(node, A.Log):
+            self.log_events.append((node.level, to_str(self.eval_expr(node.message, env))))
+            return
+        if isinstance(node, A.Delay):
+            return
+        if isinstance(node, A.ExprStmt):
+            self.eval_expr(node.expr, env)
+            return
+        raise TypeError(f"cannot execute {node!r}")
+
+    def exec_decl(self, node, env):
+        name = node.name
+        if node.kind == "global":
+            if node.value is None:
+                if self.find(name, self.root) is None:
+                    self.root.store[name] = NOTHING
+            else:
+                self.root.store[name] = self.make_value(node.value, env)
+        else:
+            env.store[name] = self.make_value(node.value, env) if node.value is not None else NOTHING
+
+    def exec_set(self, node, env):
+        value = self.eval_expr(node.value, env)
+        target = node.target
+        if isinstance(target, A.Var):
+            self.assign_var(target.name, value, env)
+        elif isinstance(target, A.Member):
+            obj = self.eval_expr(target.target, env)
+            key = self.to_key(self.eval_expr(target.key, env))
+            if isinstance(obj, ROArray):
+                obj.set(key, value)
+        else:
+            raise TypeError("bad assignment target")
+
+    def exec_docatch(self, node, env):
+        try:
+            self.exec_body(node.body, Env(env))
+        except ReturnSignal:
+            raise
+        except Exception:
+            if node.catch:
+                self.exec_body(node.catch, Env(env))
+            else:
+                raise
+
+    # ---------- program top-level ----------
+    def run(self, program):
+        stmts = program.statements
+        if not self.run_main and self.main_name:
+            stmts = [s for s in stmts if not self._is_main_call(s)]
+        try:
+            self.exec_body(stmts, self.root)
+        except ReturnSignal:
+            return NOTHING
+        return NOTHING
+
+    def _is_main_call(self, stmt):
+        if not isinstance(stmt, A.ExprStmt):
+            return False
+        node = stmt.expr
+        return (isinstance(node, A.Bracket)
+                and node.kind == "func"
+                and node.name == self.main_name)
+
+    def globals_snapshot(self):
+        return dict(self.root.store)
+
+
+def _val_eq(a, b):
+    if isinstance(a, IPValue) or isinstance(b, IPValue):
+        return isinstance(a, IPValue) and isinstance(b, IPValue) and a.value == b.value
+    if isinstance(a, Time) or isinstance(b, Time):
+        return float(getattr(a, "seconds", a)) == float(getattr(b, "seconds", b))
+    return a == b

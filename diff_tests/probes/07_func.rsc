@@ -1,0 +1,16 @@
+# Functions: inline :do={...}, $1..$n arguments, return, calls
+:local f do={:return ($1 + 1)}; :put [$f 5]
+:local g do={:return ($1 * $2)}; :put [$g 3 4]
+:local h do={:return ($1 . "-" . $2)}; :put [$h "a" "b"]
+:local f do={:return ($1)}; :put [$f 100]
+:local f do={:local t do={:return ($1 + $2)}; :return [$t 10 5]}; :put [$f 0]
+:local no do={:return "x"}; :put [$no]
+:local f do={:if ($1 = 0) do={:return "zero"}; :return "nonzero"}; :put [$f 0]
+:local f do={:if ($1 = 0) do={:return "zero"}; :return "nonzero"}; :put [$f 5]
+:put [[:do { :return 42 }]]
+:local a 2; :local f do={:return ($1 + $a)}; :put [$f 3]
+:local acc 0; :local add do={:set acc ($acc + $1)}; [$add 5]; [$add 7]; :put $acc
+:local f do={:return ($1 . $2 . $3)}; :put [$f "x" "y" "z"]
+:local f do={:return ($2)}; :put [$f "fst" "snd"]
+:local even do={:return (($1 % 2) = 0)}; :put [$even 4]
+:local even do={:return (($1 % 2) = 0)}; :put [$even 7]
