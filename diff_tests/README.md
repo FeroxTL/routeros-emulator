@@ -96,6 +96,9 @@ Real findings (RouterOS 7.9) already implemented in `routeros/*`:
   `:local`s and globals referenced with `:global name;` inside the body;
   functions never see an outer `:local`, and `:set $name` on a `:global`-declared
   name writes through to the persistent global.
+- **IP literals as member keys** (`$a->1.2`) now raise a ``ParseError`` matching
+  the device (``expected end of command``). Numeric keys (`$a->0`) and string
+  keys (`$a->\"1.2\"`) remain valid.
 - **Time prints as `HH:MM:SS`**: `90m` → `01:30:00`; composite durations like
   `1h30m` parse; `:len 90m` → `8`.
 - **`:find` returns "nothing" on no match** (not `-1`); comparisons against
@@ -113,14 +116,16 @@ Real findings (RouterOS 7.9) already implemented in `routeros/*`:
 - `num + ip` (`1 + 2.5`) on a device returns a "garbage" internal address
   (`0.0.12.242`, depends only on the `num`), while `num - ip` → error;
   the emulator gives `2.0.0.6`. This is hardware UB, not emulated.
-- ip as an **array key** (`$a->1.2`, `{1.2=...}`) is a syntax error on the device
-  (`expected end of command`); the emulator cleanly returns "nothing".
 - `:break`/`:continue` do **not exist** in RouterOS (on 7.9 both the device and
   the emulator raise an error) — deliberately not implemented.
-- `:if <literal>` (without parentheses, `:if true ...`) and `(1 and 0)` — the
-  emulator works (treats them truthy), the device fails with a syntax error;
-  the emulator is "smarter" here, but real scripts never use this form.
-- Device inline functions do **not capture** outer `:local`s (the emulator does).
+- `:if <literal>` (without parentheses, `:if true do=...`) — the device fails with
+  a syntax error; the emulator now also fails with a ``ParseError`` (different error
+  text though, so a DIFF remains). Real scripts never use this form.
+- `(1 and 0)` — on the device this is a **runtime error** (`cannot compute logical
+  "and" of time interval`), not a syntax error: the integer `1` inside parentheses
+  is treated as a time interval, and `and` cannot be applied to times. The emulator
+  treats 1 and 0 as plain integers and computes truthiness (`1 and 0` → `0` →
+  false). This is a type-model difference that does not affect real scripts.
 - `* / %` and `ip < num` raise `TypeError` in the emulator but a generic line
   error on the device; semantically it's the same "line fails", only the text
   differs.

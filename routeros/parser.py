@@ -237,6 +237,11 @@ class Parser:
     # ---------- control flow ----------
     def parse_if(self):
         self.advance()
+        t = self.current()
+        # Device: condition must be parenthesized or a variable reference.
+        # Bare literals/words (e.g. `:if true do=`) cause a syntax error.
+        if not (t.kind == "op" and t.value == "(") and t.kind != "var":
+            raise ParseError(f"expected '(' or variable at line {t.line}")
         cond = self.parse_expr()
         then = self.do_block_or_brace()
         else_ = []
@@ -279,6 +284,9 @@ class Parser:
 
     def parse_while(self):
         self.advance()
+        t = self.current()
+        if not (t.kind == "op" and t.value == "(") and t.kind != "var":
+            raise ParseError(f"expected '(' or variable at line {t.line}")
         cond = self.parse_expr()
         body = self.do_block_or_brace()
         return A.While(cond, body)
@@ -291,6 +299,9 @@ class Parser:
             # :do {...} while=(cond) — do-while
             self.advance()
             self.expect_op("=")
+            t = self.current()
+            if not (t.kind == "op" and t.value == "(") and t.kind != "var":
+                raise ParseError(f"expected '(' or variable at line {t.line}")
             cond = self.parse_expr()
             return A.DoWhile(cond, body)
         catch = []
@@ -408,7 +419,10 @@ class Parser:
         if t.kind == "var":
             self.advance()
             return A.Var(t.value)
-        if t.kind in ("num", "ip"):
+        if t.kind == "ip":
+            # RouterOS does not accept IP literals as member keys
+            raise ParseError("expected end of command")
+        if t.kind == "num":
             self.advance()
             return A.Lit(t.value)
         if t.kind == "word":
