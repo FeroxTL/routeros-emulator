@@ -62,6 +62,8 @@ class Commands:
             return self._ip(path[1:], named, positional, match)
         if head == "routing":
             return self._routing(path[1:], named, positional, match)
+        if head == "firewall":
+            return self._firewall(path[1:], named, positional, match)
         if head == "ppp":
             return self._ppp(path[1:], named, positional, match)
         if head == "certificate":
@@ -251,6 +253,8 @@ class Commands:
             if len(path) >= 2 and path[1] == "renew":
                 model.log("dhcp/renew")
                 return NOTHING
+            if len(path) >= 2 and path[1] == "find":
+                return ROArray([])
             return NOTHING
         if sub == "dns":
             return self._dns(path[1:], named, positional, match)
