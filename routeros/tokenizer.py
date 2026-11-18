@@ -141,12 +141,12 @@ def _read_string(src, i, line):
             if buf:
                 parts.append(("lit", "".join(buf)))
             return parts, i
-        if interp and c == "$" and i + 1 < len(src) and (src[i + 1].isalnum() or src[i + 1] == "_"):
+        if interp and c == "$" and i + 1 < len(src) and src[i + 1].isalnum():
             if buf:
                 parts.append(("lit", "".join(buf)))
                 buf = []
             j = i + 1
-            while j < len(src) and (src[j].isalnum() or src[j] == "_"):
+            while j < len(src) and src[j].isalnum():
                 j += 1
             parts.append(("var", src[i + 1:j]))
             i = j
@@ -196,7 +196,7 @@ def tokenize(text):
             continue
         if c == "$":
             j = i + 1
-            while j < n and (text[j].isalnum() or text[j] == "_"):
+            while j < n and text[j].isalnum():
                 j += 1
             if j == i + 1:
                 raise SyntaxError(f"bad variable at line {line}")

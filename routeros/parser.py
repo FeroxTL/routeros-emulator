@@ -101,6 +101,18 @@ class Parser:
             return t.value
         raise ParseError(f"expected identifier at line {t.line}")
 
+    def expect_var_name(self):
+        """A declared variable name must be ASCII alphanumeric (letters/digits).
+
+        The device rejects underscores anywhere (`_x` -> syntax error,
+        `x_y`/`x-`/`x.` -> error) and allows digits even at the start (`1x`).
+        """
+        t = self.current()
+        name = self.expect_ident()
+        if not (name.isascii() and name.isalnum()):
+            raise ParseError(f"invalid variable name {name!r} at line {t.line}")
+        return name
+
     # ---------- program / statements ----------
     def parse_program(self):
         stmts = []
@@ -195,7 +207,7 @@ class Parser:
         t = self.current()
         kind = "global" if t.value == "global" else "local"
         self.advance()
-        name = self.expect_ident()
+        name = self.expect_var_name()
         if self.is_op("="):
             self.advance()
         value = None
@@ -253,7 +265,7 @@ class Parser:
 
     def parse_for(self):
         self.advance()
-        var = self.expect_ident()
+        var = self.expect_var_name()
         self.expect_word("from")
         self.expect_op("=")
         from_expr = self.parse_expr()
@@ -270,11 +282,11 @@ class Parser:
 
     def parse_foreach(self):
         self.advance()
-        key = self.expect_ident()
+        key = self.expect_var_name()
         val = None
         if self.is_op(","):
             self.advance()
-            val = self.expect_ident()
+            val = self.expect_var_name()
         self.expect_word("in")
         if self.is_op("="):
             self.advance()
