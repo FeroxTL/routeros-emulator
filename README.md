@@ -133,6 +133,10 @@ m.qpro_payloads   # payloads of /tool/fetch to http://qpro.local/...
 `m.effects` is a way for tests to assert what the script *did* (rebooted USB,
 changed OVPN, saved a file) without a real router.
 
+`:delay` advances `m.uptime`, so waits based on real time (a `:while` loop on
+`/system/resource/get uptime`) terminate in tests and their duration in seconds
+can be asserted.
+
 ## Tests
 
 ```bash
@@ -159,7 +163,11 @@ The semantics were verified against a live MikroTik (RouterOS 7.9) with the
 - binary minus without spaces (`10-4`, `10--4`, `10 -4`), unary only "at the start";
 - `:for ... step=`, `do{}...while=()`, `:error` + `on-error`;
 - logical NOT is `!`; the keyword `not` — **not an operator**, but an empty prefix;
-- array/time formats, `:tobool` of a string → "nothing", `:tonum` accepts integers only.
+- array/time formats, `:tobool` of a string → "nothing", `:tonum` accepts integers only;
+- function arguments: bare literals arrive as strings (`[$f 21]` → `"21"`,
+  `A=true` → `"true"`, `A=2s` → `"2s"`), while variables/`()`/`[]`/arrays keep
+  their type; strings are coerced in arithmetic (`"21" * 2` → `42`). A literal
+  flag must be parsed with `:tobool [:find {…} $Flag]`, not `:typeof`/`:if`.
 
 How to run the harness and the details — see `diff_tests/README.md`.
 

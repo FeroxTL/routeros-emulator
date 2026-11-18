@@ -53,6 +53,7 @@ outputs are compared line by line.
 | `13_not.rsc`    | the `not` prefix (identity) and logical NOT `!` |
 | `14_where.rsc`  | comparison coercions (`1 = "1"`), `~`, `in`/CIDR, logical `||` / `&&` |
 | `15_scope.rsc`  | variable scope: first `:global`/`:local` fixes the kind, `:local` cannot shadow a `:global`, same-kind redeclare updates; function isolation (`:global name;` inside a function makes it visible, `:set` writes through, functions never see outer locals) |
+| `16_args.rsc`   | function arguments: bare literals arrive as strings (`[$f 21]` → `"21"`, `A=true` → `"true"`), variables/`()`/`[]`/arrays keep their type, the `:find`+`:tobool` flag idiom |
 
 ## What the comparison with hardware has confirmed and baked in
 
@@ -106,6 +107,14 @@ Real findings (RouterOS 7.9) already implemented in `routeros/*`:
 - **`:pick` with 2 arguments** — one character from a position.
 - **`:tobool` of a string → "nothing"**; **`:tonum`** accepts integers only
   (no spaces/fractions), otherwise "nothing".
+- **Function arguments**: bare literals arrive as **strings** — `[$f 21]` →
+  `$1 = "21"`, `A=true` → `"true"`, `A=2s` → `"2s"`; variables, `( )`/`[ ]`
+  expressions and arrays keep their type. A literal flag therefore cannot be
+  checked with `:typeof`/`:if` (`:if "true"` → "conditional is not boolean"),
+  only with `:tobool [:find {…} $Flag]`.
+- **Strings are coerced in arithmetic**: `"21" * 2` → `42`, `"21" + 1` → `22`
+  (this matters because a numeric literal argument is a string inside the
+  function).
 
 ## Known limitations (not implemented — they don't affect real scripts)
 

@@ -5,6 +5,19 @@ from .tokenizer import tokenize
 from .values import NOTHING, Time
 
 
+def _literal_key(parts):
+    """Array-literal key from a quoted token -> plain string.
+
+    String tokens carry their parts (``[(kind, text), ...]``) so that `$var`
+    interpolation works. A quoted key like ``"timeouts"=1`` must be stored as a
+    plain string, otherwise ``$conf->"timeouts"`` (member lookup) never matches.
+    Interpolated keys keep the raw parts (they cannot be resolved at parse time).
+    """
+    if len(parts) == 1 and parts[0][0] == "lit":
+        return parts[0][1]
+    return parts
+
+
 class ParseError(SyntaxError):
     pass
 
@@ -513,7 +526,7 @@ class Parser:
                 self.advance()
                 if self.is_op("="):
                     self.advance()
-                    entries.append((t.value, self.parse_expr()))
+                    entries.append((_literal_key(t.value), self.parse_expr()))
                 else:
                     entries.append((None, A.Str(t.value)))
             elif t.kind == "word":

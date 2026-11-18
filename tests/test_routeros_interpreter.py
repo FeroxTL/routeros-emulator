@@ -43,6 +43,14 @@ class TestVariables(InterpCase):
         self.run_ros(':set ($x->"a") "1";')
         self.assertEqual(self.run_ros(':put ($x->"a");'), ["1"])
 
+    def test_quoted_array_literal_keys(self):
+        """Quoted keys of an array literal are reachable via ->"key"."""
+        self.run_ros(':local c {"timeouts"={wired=20};"scriptConfigFile"="flash/lteConfig.txt"};')
+        self.run_ros(':put ($c->"timeouts"->"wired");')
+        self.assertEqual(self.interp.output[-1], "20")
+        self.run_ros(':put ($c->"scriptConfigFile");')
+        self.assertEqual(self.interp.output[-1], "flash/lteConfig.txt")
+
     def test_set_without_equals(self):
         """:set works on an existing variable without the `=` part too."""
         self.run_ros(":local y;")
@@ -160,6 +168,81 @@ class TestControlFlow(InterpCase):
         self.run_ros(":local d do={:return ($1 * 2);};")
         self.run_ros(":put [$d 21];")
         self.assertEqual(self.interp.output[-1], "42")
+
+
+class TestFunctionArguments(InterpCase):
+    """Function arguments: on a device bare literals arrive as strings, while
+    variables/expressions/arrays keep their type (checked on RouterOS 7.9)."""
+
+    def test_positional_literal_is_str(self):
+        """[$f 21] -> $1 = "21" (str); [$f $n] keeps the variable type."""
+        self.run_ros(":local d do={:return [:typeof $1];};")
+        self.run_ros(":put [$d 21];")
+        self.assertEqual(self.interp.output[-1], "str")
+        self.run_ros(":local n 21; :put [$d $n];")
+        self.assertEqual(self.interp.output[-1], "num")
+
+    def test_named_literal_is_str(self):
+        """A=true -> "true" (str); A=$boolVar -> bool; A=$arr -> array."""
+        self.run_ros(":local d do={:return [:typeof $A];};")
+        self.run_ros(":put [$d A=true];")
+        self.assertEqual(self.interp.output[-1], "str")
+        self.run_ros(":local b true; :put [$d A=$b];")
+        self.assertEqual(self.interp.output[-1], "bool")
+        self.run_ros(' :local arr {"a";"b"}; :put [$d A=$arr];')
+        self.assertEqual(self.interp.output[-1], "array")
+
+    def test_expression_argument_keeps_type(self):
+        """An expression in parens/brackets keeps its type (num here)."""
+        self.run_ros(":local d do={:return [:typeof $A];};")
+        self.run_ros(":put [$d A=(1+2)];")
+        self.assertEqual(self.interp.output[-1], "num")
+        self.run_ros(':put [$d A=[:len "abc"]];')
+        self.assertEqual(self.interp.output[-1], "num")
+
+    def test_str_argument_in_arithmetic(self):
+        """A string argument is coerced in arithmetic: "21" * 2 => 42."""
+        self.run_ros(":local d do={:return ($1 * 2);};")
+        self.run_ros(":put [$d 21];")
+        self.assertEqual(self.interp.output[-1], "42")
+
+    def test_flag_parsing_idiom(self):
+        """The script's flag idiom (:find + :tobool) works for a string literal,
+        for a bool variable and when the argument is missing."""
+        self.run_ros(':local flag do={:return [:tobool [:find {"";"true";"1";"yes";yes;1} $DropOVPN]];};')
+        self.run_ros(":put [$flag DropOVPN=true];")
+        self.assertEqual(self.interp.output[-1], "true")
+        self.run_ros(":put [$flag DropOVPN=false];")
+        self.assertEqual(self.interp.output[-1], "false")
+        self.run_ros(":local b true; :put [$flag DropOVPN=$b];")
+        self.assertEqual(self.interp.output[-1], "true")
+        self.run_ros(":put [$flag];")
+        self.assertEqual(self.interp.output[-1], "false")
+
+
+class TestSimulatedClock(InterpCase):
+    """`:delay` advances the simulated uptime, so time-based waits are testable."""
+
+    def test_delay_advances_uptime(self):
+        """`:delay 2s` moves model.uptime forward by 2 seconds."""
+        start = self.interp.model.uptime.seconds
+        self.run_ros(":delay 2s;")
+        self.assertEqual(self.interp.model.uptime.seconds, start + 2)
+
+    def test_uptime_snapshot_semantics(self):
+        """A value kept in a variable does not move with the clock."""
+        self.run_ros(":local t [/system/resource/get uptime];")
+        self.run_ros(":delay 5s;")
+        self.run_ros(":put ($t = 02:00:00);")
+        self.assertEqual(self.interp.output[-1], "true")
+        self.run_ros(":put ([/system/resource/get uptime] = 02:00:00);")
+        self.assertEqual(self.interp.output[-1], "false")
+
+    def test_time_based_while_terminates(self):
+        """A deadline loop on /system/resource/get uptime runs its real duration."""
+        self.run_ros(":local started [/system/resource/get uptime];")
+        self.run_ros(':local i 0; :while (([/system/resource/get uptime] - $started) < 2s) do={:set i ($i + 1); :delay 0.5s;}; :put $i;')
+        self.assertEqual(self.interp.output[-1], "4")
 
 
 class TestIP(InterpCase):

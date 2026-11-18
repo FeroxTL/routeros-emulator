@@ -175,6 +175,16 @@ class Interpreter:
             return v.seconds
         if isinstance(v, (int, float)):
             return v
+        if isinstance(v, str):
+            # RouterOS coerces numeric strings in arithmetic: "21" * 2 => 42
+            # (function arguments arrive as strings, so this path is common).
+            try:
+                return int(v)
+            except ValueError:
+                try:
+                    return float(v)
+                except ValueError:
+                    return 0
         return 0
 
     @staticmethod
@@ -283,6 +293,18 @@ class Interpreter:
             return env.store.get(node.name, NOTHING)
         return self.eval_expr(node, env)
 
+    def _arg_value(self, node, env):
+        """Evaluate a function argument the way a device does.
+
+        RouterOS passes *bare literal* arguments as strings (`[$f 21]` -> "21",
+        `A=true` -> "true", `A=2s` -> "2s"), while variables, `( )`/`[ ]`
+        expressions and arrays keep their type. Checked on RouterOS 7.9.
+        """
+        value = self.eval_expr(node, env)
+        if isinstance(node, A.Lit) and isinstance(value, (bool, int, float)):
+            return to_str(value)
+        return value
+
     def call_user(self, name, args, env):
         fn = self.resolve(name, env)
         if not isinstance(fn, FunctionValue):
@@ -291,10 +313,10 @@ class Interpreter:
         pos = 0
         for a in args:
             if a.name is not None:
-                frame.store[a.name] = self.eval_expr(a.value, env)
+                frame.store[a.name] = self._arg_value(a.value, env)
             else:
                 pos += 1
-                frame.store[str(pos)] = self.eval_expr(a.value, env)
+                frame.store[str(pos)] = self._arg_value(a.value, env)
         try:
             self.exec_body(fn.body, frame)
         except ReturnSignal as r:
@@ -481,6 +503,9 @@ class Interpreter:
             self.log_events.append((node.level, to_str(self.eval_expr(node.message, env))))
             return
         if isinstance(node, A.Delay):
+            # `:delay` advances the simulated clock, so time-based waits
+            # (`:while` on /system/resource/get uptime) terminate in tests.
+            self.model.advance_time(self.eval_expr(node.value, env))
             return
         if isinstance(node, A.ExprStmt):
             self.eval_expr(node.expr, env)

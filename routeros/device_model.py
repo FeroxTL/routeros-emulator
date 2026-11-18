@@ -58,6 +58,18 @@ class DeviceModel:
     def log(self, msg):
         self.effects.append(msg)
 
+    def advance_time(self, delta):
+        """Advance the simulated uptime by a ``time`` value (script ``:delay``).
+
+        ``uptime`` is *replaced* rather than mutated, so a value a script kept in
+        a variable behaves like a snapshot, exactly as on a real device.
+        """
+        seconds = getattr(delta, "seconds", None)
+        if seconds is None:
+            seconds = delta if isinstance(delta, (int, float)) else 0
+        self.uptime = Time(self.uptime.seconds + float(seconds or 0))
+        return self.uptime
+
     # ---- convenience accessors used by /interface/... overlay ----
     def lte_by_id(self, num):
         for it in self.lte:
